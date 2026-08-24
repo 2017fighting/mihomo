@@ -23,6 +23,7 @@ import (
 	"github.com/metacubex/mihomo/component/cidr"
 	"github.com/metacubex/mihomo/component/fakeip"
 	"github.com/metacubex/mihomo/component/geodata"
+	"github.com/metacubex/mihomo/component/preferred"
 	"github.com/metacubex/mihomo/component/process"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/sniffer"
@@ -173,6 +174,7 @@ type DNS struct {
 	ProxyServerPolicy     []dns.Policy
 	DirectNameServer      []dns.NameServer
 	DirectFollowPolicy    bool
+	PreferredIP           []preferred.EntryConfig
 }
 
 // Profile config
@@ -246,6 +248,7 @@ type RawDNS struct {
 	ProxyServerNameserverPolicy  *orderedmap.OrderedMap[string, any] `yaml:"proxy-server-nameserver-policy" json:"proxy-server-nameserver-policy"`
 	DirectNameServer             []string                            `yaml:"direct-nameserver" json:"direct-nameserver"`
 	DirectNameServerFollowPolicy bool                                `yaml:"direct-nameserver-follow-policy" json:"direct-nameserver-follow-policy"`
+	PreferredIP                  []RawPreferredIP                    `yaml:"preferred-ip" json:"preferred-ip"`
 }
 
 type RawFallbackFilter struct {
@@ -254,6 +257,34 @@ type RawFallbackFilter struct {
 	IPCIDR    []string `yaml:"ipcidr" json:"ipcidr"`
 	Domain    []string `yaml:"domain" json:"domain"`
 	GeoSite   []string `yaml:"geosite" json:"geosite"`
+}
+
+// RawPreferredIP mirrors one dns.preferred-ip entry (dns 配置层)。
+type RawPreferredIP struct {
+	Name        string                `yaml:"name" json:"name"`
+	CIDR        []string              `yaml:"cidr" json:"cidr"`
+	IPv6        string                `yaml:"ipv6" json:"ipv6"`
+	AnswerCount int                   `yaml:"answer-count" json:"answer-count"`
+	TTLCap      int                   `yaml:"ttl-cap" json:"ttl-cap"`
+	Persist     *bool                 `yaml:"persist" json:"persist"`
+	SpeedTest   RawPreferredSpeedTest `yaml:"speedtest" json:"speedtest"`
+}
+
+// RawPreferredSpeedTest: duration fields accept "24h"-style strings or bare
+// numbers (seconds), so both `interval: 24h` and `interval: 86400` work.
+type RawPreferredSpeedTest struct {
+	URL             string  `yaml:"url" json:"url"`
+	Interval        any     `yaml:"interval" json:"interval"`
+	DisableDownload bool    `yaml:"disable-download" json:"disable-download"`
+	Threads         int     `yaml:"threads" json:"threads"`
+	TCPPort         int     `yaml:"tcp-port" json:"tcp-port"`
+	PingTimes       int     `yaml:"ping-times" json:"ping-times"`
+	DownloadCount   int     `yaml:"download-count" json:"download-count"`
+	DownloadTimeout any     `yaml:"download-time" json:"download-time"`
+	MaxDelay        any     `yaml:"max-delay" json:"max-delay"`
+	MinDelay        any     `yaml:"min-delay" json:"min-delay"`
+	MaxLossRate     float64 `yaml:"max-loss-rate" json:"max-loss-rate"`
+	MinSpeed        float64 `yaml:"min-speed" json:"min-speed"` // MB/s
 }
 
 type RawClashForAndroid struct {
@@ -1398,6 +1429,128 @@ func parseNameServerPolicy(nsPolicy *orderedmap.OrderedMap[string, any], rulePro
 	return policy, nil
 }
 
+// parsePreferredDuration accepts "24h"/"10s"/"9999ms" strings or bare numbers
+// (seconds) so YAML stays ergonomic in both styles.
+func parsePreferredDuration(v any) (time.Duration, error) {
+	switch t := v.(type) {
+	case nil:
+		return 0, nil
+	case string:
+		if t == "" {
+			return 0, nil
+		}
+		return time.ParseDuration(t)
+	case int:
+		return time.Duration(t) * time.Second, nil
+	case int64:
+		return time.Duration(t) * time.Second, nil
+	case uint64:
+		return time.Duration(t) * time.Second, nil
+	case float64:
+		return time.Duration(t * float64(time.Second)), nil
+	default:
+		return 0, fmt.Errorf("invalid duration value %v", v)
+	}
+}
+
+func parsePreferredIP(raw []RawPreferredIP) ([]preferred.EntryConfig, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]preferred.EntryConfig, 0, len(raw))
+	for i, r := range raw {
+		if strings.TrimSpace(r.Name) == "" {
+			return nil, fmt.Errorf("dns.preferred-ip[%d]: name is required", i)
+		}
+		if _, dup := seen[r.Name]; dup {
+			return nil, fmt.Errorf("dns.preferred-ip[%d]: duplicate name %q (it is the persistence key)", i, r.Name)
+		}
+		seen[r.Name] = struct{}{}
+		if len(r.CIDR) == 0 {
+			return nil, fmt.Errorf("dns.preferred-ip[%s]: cidr is required", r.Name)
+		}
+		mode := preferred.IPv6Mode(strings.TrimSpace(r.IPv6))
+		switch mode {
+		case "", preferred.ModeReplace, preferred.ModeBlock:
+		default:
+			return nil, fmt.Errorf("dns.preferred-ip[%s]: ipv6 must be replace or block, got %q", r.Name, r.IPv6)
+		}
+
+		st, err := parsePreferredSpeedTest(r.Name, r.SpeedTest)
+		if err != nil {
+			return nil, err
+		}
+
+		persist := true
+		if r.Persist != nil {
+			persist = *r.Persist
+		}
+		out = append(out, preferred.EntryConfig{
+			Name:        r.Name,
+			CIDR:        r.CIDR,
+			IPv6:        mode,
+			AnswerCount: clampInt(r.AnswerCount, preferred.DefaultAnswerCount, 1, 16),
+			TTLCap:      clampInt(r.TTLCap, preferred.DefaultTTLCapSec, 1, 0),
+			Persist:     persist,
+			SpeedTest:   st,
+		})
+	}
+	return out, nil
+}
+
+// clampInt returns def when v <= 0, clamps to [min, max] otherwise
+// (max == 0 means unbounded).
+func clampInt(v, def, minv, maxv int) int {
+	if v <= 0 {
+		return def
+	}
+	if v < minv {
+		return minv
+	}
+	if maxv > 0 && v > maxv {
+		return maxv
+	}
+	return v
+}
+
+func parsePreferredSpeedTest(name string, r RawPreferredSpeedTest) (preferred.SpeedTestConfig, error) {
+	st := preferred.SpeedTestConfig{
+		URL:             strings.TrimSpace(r.URL),
+		DisableDownload: r.DisableDownload,
+		Threads:         clampInt(r.Threads, 200, 1, 1000),
+		TCPPort:         clampInt(r.TCPPort, 443, 1, 65535),
+		PingTimes:       clampInt(r.PingTimes, 4, 1, 0),
+		DownloadCount:   clampInt(r.DownloadCount, 10, 1, 0),
+		MinSpeedMB:      r.MinSpeed,
+		MaxLossRate:     float32(r.MaxLossRate),
+	}
+	if r.MaxLossRate < 0 || r.MaxLossRate > 1 {
+		return st, fmt.Errorf("dns.preferred-ip[%s]: speedtest.max-loss-rate must be within [0, 1]", name)
+	}
+	if r.MinSpeed < 0 {
+		return st, fmt.Errorf("dns.preferred-ip[%s]: speedtest.min-speed must be >= 0", name)
+	}
+
+	var err error
+	if st.Interval, err = parsePreferredDuration(r.Interval); err != nil {
+		return st, fmt.Errorf("dns.preferred-ip[%s]: speedtest.interval: %w", name, err)
+	}
+	if st.DownloadTimeout, err = parsePreferredDuration(r.DownloadTimeout); err != nil {
+		return st, fmt.Errorf("dns.preferred-ip[%s]: speedtest.download-time: %w", name, err)
+	}
+	if st.MaxDelay, err = parsePreferredDuration(r.MaxDelay); err != nil {
+		return st, fmt.Errorf("dns.preferred-ip[%s]: speedtest.max-delay: %w", name, err)
+	}
+	if st.MinDelay, err = parsePreferredDuration(r.MinDelay); err != nil {
+		return st, fmt.Errorf("dns.preferred-ip[%s]: speedtest.min-delay: %w", name, err)
+	}
+	if st.Interval != 0 && st.Interval < time.Minute {
+		return st, fmt.Errorf("dns.preferred-ip[%s]: speedtest.interval must be >= 1m", name)
+	}
+	return st, nil
+}
+
 func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS, error) {
 	cfg := rawCfg.DNS
 	if cfg.Enable && len(cfg.NameServer) == 0 {
@@ -1597,6 +1750,10 @@ func parseDNS(rawCfg *RawConfig, ruleProviders map[string]P.RuleProvider) (*DNS,
 			}
 		}
 		dnsCfg.FallbackLazyQuery = cfg.FallbackLazyQuery
+	}
+
+	if dnsCfg.PreferredIP, err = parsePreferredIP(cfg.PreferredIP); err != nil {
+		return nil, err
 	}
 
 	return dnsCfg, nil

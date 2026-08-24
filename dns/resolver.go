@@ -9,6 +9,7 @@ import (
 	"github.com/metacubex/mihomo/common/arc"
 	"github.com/metacubex/mihomo/common/lru"
 	"github.com/metacubex/mihomo/common/singleflight"
+	"github.com/metacubex/mihomo/component/preferred"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/trie"
 	C "github.com/metacubex/mihomo/constant"
@@ -365,6 +366,14 @@ func (r *Resolver) lookupIP(ctx context.Context, host string, dnsType uint16) (i
 	}
 
 	ips = msgToIP(msg)
+
+	// preferred-ip rewrite (internal path): mihomo's own dials — DIRECT
+	// outbound with direct-nameserver set, node resolution, etc. Applied after
+	// the cache so the cache keeps upstream truth (docs/adr/0001).
+	if rewritten := preferred.Default.RewriteLookup(ips, dnsType == D.TypeAAAA); rewritten != nil {
+		ips = rewritten
+	}
+
 	ipLength := len(ips)
 	if ipLength == 0 {
 		return []netip.Addr{}, resolver.ErrIPNotFound
