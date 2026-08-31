@@ -164,6 +164,11 @@ func (e *entry) testRound(ctx context.Context) error {
 	if len(scores) == 0 {
 		return errors.New("no candidate survived latency filters")
 	}
+	if scores[0].lossRate == 0 {
+		log.Infoln("[PreferredIP] %s: latency phase done, %d/%d survived, best delay %s (0%% loss)", e.cfg.Name, len(scores), len(cands), scores[0].avg)
+	} else {
+		log.Infoln("[PreferredIP] %s: latency phase done, %d/%d survived, best delay %s", e.cfg.Name, len(scores), len(cands), scores[0].avg)
+	}
 
 	ranked, err := e.rankByDownload(cctx, scores)
 	if err != nil {
@@ -278,7 +283,9 @@ func (e *entry) tcping(ctx context.Context, ip netip.Addr, port, times int) (rec
 		default:
 		}
 		start := time.Now()
-		conn, err := dialer.DialContext(ctx, network, address)
+		dctx, cancel := context.WithTimeout(ctx, tcpConnectTimeout) // CFST parity: 1s per dial, blackholed IPs must not stall the round
+		conn, err := dialer.DialContext(dctx, network, address)
+		cancel()
 		if err != nil {
 			continue
 		}
@@ -344,6 +351,7 @@ func (e *entry) rankByDownload(ctx context.Context, scores []candidateScore) ([]
 		default:
 		}
 		results[i] = ipSpeed{idx: i, speed: e.downloadOnce(ctx, queue[i].ip, timeout)}
+		log.Infoln("[PreferredIP] %s: download [%d/%d] %s: %.2f MB/s", e.cfg.Name, i+1, len(queue), queue[i].ip, results[i].speed/1024/1024)
 	}
 
 	floor := st.MinSpeedMB * 1024 * 1024
