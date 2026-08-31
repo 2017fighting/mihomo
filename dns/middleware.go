@@ -7,6 +7,7 @@ import (
 
 	"github.com/metacubex/mihomo/common/lru"
 	"github.com/metacubex/mihomo/component/fakeip"
+	"github.com/metacubex/mihomo/component/preferred"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	icontext "github.com/metacubex/mihomo/context"
@@ -196,6 +197,68 @@ func withFakeIP(skipper *fakeip.Skipper, fakePool *fakeip.Pool, fakePool6 *fakei
 	}
 }
 
+// withPreferredIP rewrites upstream answers whose records fall inside a
+// configured preferred-ip range set. Runs INSIDE withMapping (compose folds
+// right-to-left, and withMapping was appended first): the mapping table must
+// record the REWRITTEN IP -> host so redir-host/TUN DIRECT connections keep
+// hitting DOMAIN rules (see docs/adr/0001). Pool not ready -> passthrough.
+func withPreferredIP(next handler) handler {
+	return func(ctx *icontext.DNSContext, r *D.Msg) (*D.Msg, error) {
+		q := r.Question[0]
+		if q.Qclass != D.ClassINET || (q.Qtype != D.TypeA && q.Qtype != D.TypeAAAA) {
+			return next(ctx, r)
+		}
+
+		msg, err := next(ctx, r)
+		if err != nil || msg == nil {
+			return msg, err
+		}
+
+		mgr := preferred.Default
+		isV6 := q.Qtype == D.TypeAAAA
+		entry := mgr.Match(msgToIP(msg), isV6)
+		if entry == nil {
+			return msg, nil
+		}
+		if isV6 && entry.BlockIPv6() {
+			log.Debugln("[DNS Server] preferred-ip[%s] blocked AAAA for %s", entry.Name(), q.Name)
+			return handleMsgWithEmptyAnswer(r), nil
+		}
+		pool := entry.AnswerPool(isV6)
+		if len(pool) == 0 { // pool not ready: passthrough
+			log.Debugln("[DNS Server] preferred-ip[%s] pool not ready, passthrough %s", entry.Name(), q.Name)
+			return msg, nil
+		}
+
+		msg = msg.Copy() // cache holds the original; rewrite only the copy we serve
+		ttl := entry.TTLCap()
+		answers := make([]D.RR, 0, len(msg.Answer)+len(pool))
+		for _, ans := range msg.Answer {
+			switch ans.(type) {
+			case *D.A, *D.AAAA:
+				continue // drop records of the rewritten family, keep CNAME et al.
+			}
+			answers = append(answers, ans)
+		}
+		for _, ip := range pool {
+			if isV6 {
+				answers = append(answers, &D.AAAA{
+					Hdr:  D.RR_Header{Name: q.Name, Rrtype: D.TypeAAAA, Class: D.ClassINET, Ttl: ttl},
+					AAAA: ip.AsSlice(),
+				})
+			} else {
+				answers = append(answers, &D.A{
+					Hdr: D.RR_Header{Name: q.Name, Rrtype: D.TypeA, Class: D.ClassINET, Ttl: ttl},
+					A:   ip.AsSlice(),
+				})
+			}
+		}
+		msg.Answer = answers
+		msg.Authoritative = true
+		return msg, nil
+	}
+}
+
 func withResolver(resolver resolver.Resolver, ipv6 bool) handler {
 	return func(ctx *icontext.DNSContext, r *D.Msg) (*D.Msg, error) {
 		ctx.SetType(icontext.DNSTypeRaw)
@@ -244,6 +307,11 @@ func newHandler(resolver resolver.Resolver, mapper *ResolverEnhancer) handler {
 	if mapper.mode != C.DNSNormal {
 		middlewares = append(middlewares, withMapping(mapper.mapping))
 	}
+
+	// preferred-ip rewrite runs innermost (closest to the resolver) so that
+	// withMapping — when present — records rewritten IPs; in normal mode it is
+	// still the last step before the resolver. See docs/adr/0001.
+	middlewares = append(middlewares, withPreferredIP)
 
 	return compose(middlewares, withResolver(resolver, mapper.ipv6))
 }
