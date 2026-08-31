@@ -6,7 +6,7 @@ import (
 
 	"github.com/metacubex/mihomo/component/preferred"
 
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 func parsePreferredYAML(t *testing.T, s string) []preferred.EntryConfig {
