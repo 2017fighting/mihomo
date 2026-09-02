@@ -20,7 +20,7 @@ jobs:
     strategy:
       matrix:
         jobs:
-          - {goos: linux, goarch: amd64, goamd64: v3, output: amd64}
+          - {goos: linux, goarch: amd64, goamd64: v1, output: amd64}
 
     steps:
       - uses: actions/checkout@v6
