@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"github.com/metacubex/mihomo/component/resolver"
 )
 
 // 请求体子命令前两字节（第三字节为路由 flags）。
@@ -264,12 +266,17 @@ func (c *Client) handshake(ctx context.Context, conn net.Conn, br *bufio.Reader,
 
 // resolveToIP 尽力把 host:port 解析为 IP:port（原版行为）；失败时原样返回。
 // 真实节点只接受 IP 目标（ATYP=3 域名会被拒绝，实测 REP=0x0a）。
+// 必须走 mihomo 解析链（DefaultResolver→SystemResolver）——
+// 禁用裸 net 解析器（main.go 挂了 net.DefaultResolver 防护钩，命中即 panic）。
 func resolveToIP(address string) string {
-	ta, err := net.ResolveTCPAddr("tcp", address)
-	if err != nil || ta.IP == nil {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || net.ParseIP(host) != nil {
 		return address
 	}
-	return ta.String()
+	if ip, err := resolver.ResolveIP(context.Background(), host); err == nil {
+		return net.JoinHostPort(ip.String(), port)
+	}
+	return address
 }
 
 // DialTCP 与节点完成 TCP CONNECT 握手（子命令 01 02），成功后 conn 即为
