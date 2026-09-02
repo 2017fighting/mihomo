@@ -14,6 +14,7 @@ const (
 	HTTP
 	Compatible
 	Inline
+	Heybox
 )
 
 // VehicleType defined
@@ -29,6 +30,8 @@ func (v VehicleType) String() string {
 		return "Compatible"
 	case Inline:
 		return "Inline"
+	case Heybox:
+		return "Heybox"
 	default:
 		return "Unknown"
 	}

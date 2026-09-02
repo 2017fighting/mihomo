@@ -54,6 +54,7 @@ const (
 	Tailscale
 	ZeroTier
 	GostRelay
+	Heybox
 )
 
 const (
@@ -172,6 +173,13 @@ type Proxy interface {
 	URLTest(ctx context.Context, url string, expectedStatus utils.IntRanges[uint16]) (uint16, error)
 }
 
+// DelayHinter 是出站的可选能力：提供不经 HTTP 拨号的自定义延迟探测
+// （如 heybox 的节点 UDP echo），供健康检查与 url-test 组复用。
+// 实现者的 URLTest 将委托至此，不再发起真实拨测。
+type DelayHinter interface {
+	DelayHint(ctx context.Context) (uint16, error)
+}
+
 // AdapterType is enum of adapter type
 type AdapterType int
 
@@ -239,6 +247,8 @@ func (at AdapterType) String() string {
 		return "ZeroTier"
 	case GostRelay:
 		return "GostRelay"
+	case Heybox:
+		return "Heybox"
 	case Relay:
 		return "Relay"
 	case Selector:

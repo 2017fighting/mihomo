@@ -390,6 +390,12 @@ func (p *autoCloseProxyAdapter) Close() error {
 	return p.closeErr
 }
 
+// UnwrapAdapter 返回被包装的内层出站，供类型断言沿包装链下钻（如 DelayHinter）。
+// 返回常量层接口类型以匹配断言签名（值本身满足该接口）。
+func (p *autoCloseProxyAdapter) UnwrapAdapter() C.ProxyAdapter {
+	return p.ProxyAdapter
+}
+
 func NewAutoCloseProxyAdapter(adapter ProxyAdapter) ProxyAdapter {
 	proxy := &autoCloseProxyAdapter{
 		ProxyAdapter: adapter,

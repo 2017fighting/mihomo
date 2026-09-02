@@ -94,6 +94,33 @@ func ParseProxyProvider(name string, mapping map[string]any, tunnel C.Tunnel) (P
 		vehicle = resource.NewHTTPVehicle(schema.URL, path, schema.Proxy, schema.Header, resource.DefaultHttpTimeout, schema.SizeLimit)
 	case "inline":
 		return NewInlineProvider(name, schema.Payload, parser, hc)
+	case "heybox":
+		heyboxSchema := &heyboxProviderSchema{}
+		if err := decoder.Decode(mapping, heyboxSchema); err != nil {
+			return nil, err
+		}
+		if heyboxSchema.HeyboxID == 0 || heyboxSchema.Pkey == "" {
+			return nil, errors.New("heybox provider requires heybox-id and pkey")
+		}
+		if len(heyboxSchema.Games) == 0 {
+			return nil, errors.New("heybox provider requires games (acc_id list)")
+		}
+		// 探活/测速由出站的 DelayHint（UDP echo）承担，不使用 TCP 健康检查；
+		// 用户配置的 health-check 被忽略（中性化：无 url、不自动跑）。
+		hcNeutral := NewHealthCheck([]C.Proxy{}, "", 0, 0, true, nil)
+		// 枚举无会话副作用，默认 600s 自动刷新 = 节点列表与延迟数据刷新
+		interval := time.Duration(uint(schema.Interval)) * time.Second
+		if schema.Interval == 0 {
+			interval = 600 * time.Second
+		}
+		return NewProxySetProvider(
+			name,
+			interval,
+			schema.Payload,
+			wrapHeyboxCredParser(parser, heyboxSchema),
+			NewHeyboxVehicle(name, heyboxSchema),
+			hcNeutral,
+		)
 	default:
 		return nil, fmt.Errorf("%w: %s", errVehicleType, schema.Type)
 	}

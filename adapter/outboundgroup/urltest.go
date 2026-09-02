@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/metacubex/mihomo/common/callback"
@@ -51,6 +52,26 @@ func (u *URLTest) Set(name string) error {
 func (u *URLTest) ForceSet(name string) {
 	u.selected = name
 	u.fastSingle.Reset()
+}
+
+// DelayHint implements C.DelayHinter —— 组级测速零拨号：返回当前最快成员的
+// 最近已知延迟（成员自身的测速已由各自的 DelayHint/URLTest 机制完成）。
+// 使上层组（如 select 包含本组）的测速不再经本组真实拨测，
+// 对 heybox 等零会话探活成员尤为重要。
+func (u *URLTest) DelayHint(_ context.Context) (uint16, error) {
+	best := uint16(0)
+	for _, proxy := range u.GetProxies(false) {
+		if !proxy.AliveForTestUrl(u.testUrl) {
+			continue
+		}
+		if d := proxy.LastDelayForTestUrl(u.testUrl); d > 0 && (best == 0 || d < best) {
+			best = d
+		}
+	}
+	if best == 0 {
+		return 0, fmt.Errorf("url-test group %s: no alive member with delay history", u.Name())
+	}
+	return best, nil
 }
 
 // DialContext implements C.ProxyAdapter
