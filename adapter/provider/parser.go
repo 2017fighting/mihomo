@@ -94,6 +94,27 @@ func ParseProxyProvider(name string, mapping map[string]any, tunnel C.Tunnel) (P
 		vehicle = resource.NewHTTPVehicle(schema.URL, path, schema.Proxy, schema.Header, resource.DefaultHttpTimeout, schema.SizeLimit)
 	case "inline":
 		return NewInlineProvider(name, schema.Payload, parser, hc)
+	case "heybox":
+		heyboxSchema := &heyboxProviderSchema{}
+		if err := decoder.Decode(mapping, heyboxSchema); err != nil {
+			return nil, err
+		}
+		if heyboxSchema.HeyboxID == 0 || heyboxSchema.Pkey == "" {
+			return nil, errors.New("heybox provider requires heybox-id and pkey")
+		}
+		if len(heyboxSchema.Games) == 0 {
+			return nil, errors.New("heybox provider requires games (acc_id list)")
+		}
+		// 默认不自动定时刷新：刷新（手动/RESTful API）语义 = 重新枚举节点。
+		// interval 仅在用户显式配置时生效。
+		return NewProxySetProvider(
+			name,
+			time.Duration(uint(schema.Interval))*time.Second,
+			schema.Payload,
+			wrapHeyboxCredParser(parser, heyboxSchema),
+			NewHeyboxVehicle(name, heyboxSchema),
+			hc,
+		)
 	default:
 		return nil, fmt.Errorf("%w: %s", errVehicleType, schema.Type)
 	}
