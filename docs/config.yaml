@@ -262,12 +262,40 @@ dns:
     - system # append DNS server from system configuration. If not found, it would print an error log and skip.
   enhanced-mode: fake-ip # or redir-host
 
+  # IP 优选：DNS 答案命中 cidr 段时，替换为内嵌测速器（强制直连 tcping+下载测速）
+  # 筛出的优选池前 N 条；池未就绪（首次测速完成前）原样透传。
+  # cidr 列表同时驱动匹配与测速候选，建议从 https://www.cloudflare.com/ips-v4 / ips-v6 获取
+  preferred-ip:
+    - name: cloudflare # 必填，持久化键，不能重复
+      cidr:
+        - 173.245.48.0/20
+        - 103.21.244.0/22
+        # - 2606:4700::/32 # v6 段列出后 AAAA 才会命中；不想走 v6 配 ipv6: block
+      ipv6: block # replace(默认，用 v6 优选池替换) / block(命中返回空答案)
+      answer-count: 5 # 改写后返回的前 N 条，默认 5
+      ttl-cap: 60 # 改写记录 TTL 上限（秒），默认 60
+      persist: true # 测速结果持久化到 cache.db，重启后立即生效，默认 true
+      speedtest:
+        url: "" # 下载测速地址，留空用 speed.cloudflare.com，建议自建
+        interval: 24h # 定时重测，支持 "24h" 或秒数，默认 24h
+        disable-download: false # true 则仅按延迟排序
+        threads: 200 # tcping 并发，默认 200
+        tcp-port: 443 # tcping 端口，默认 443
+        ping-times: 4 # tcping 次数，默认 4
+        download-count: 10 # 下载测速数量，默认 10
+        download-time: 10s # 单 IP 下载时长，默认 10s
+        max-delay: 9999ms # 平均延迟上限
+        # min-delay: 0ms # 平均延迟下限
+        # max-loss-rate: 1.0 # 丢包率上限 [0,1]，1 为不过滤
+        # min-speed: 0 # 下载速度下限 MB/s
+  # RESTful: GET /preferred-ip 查看当前池，POST /preferred-ip/speedtest 触发重测
+
   fake-ip-range: 198.18.0.1/16 # fake-ip 池设置
   # fake-ip-range6: fdfe:dcba:9876::1/64 # fake-ip6 池设置
 
   # 配置不使用 fake-ip 的域名
   fake-ip-filter:
-    - '*.lan'
+    - "*.lan"
     - localhost.ptlogin2.qq.com
     # fakeip-filter 为 rule-providers 中的名为 fakeip-filter 规则订阅，
     # 且 behavior 必须为 domain/classical，当为 classical 时仅会生效域名类规则
@@ -426,7 +454,7 @@ proxies: # socks5
       host: bing.com
       password: "shadow_tls_password"
       version: 2 # support 1/2/3
-      alpn: ["h2","http/1.1"]
+      alpn: ["h2", "http/1.1"]
 
   - name: "snell-restls"
     type: snell
@@ -767,13 +795,13 @@ proxies: # socks5
     #   password: jls-password
     # reality-opts: ...
     # ws-opts:
-      # path: /path
-      # headers:
-      #   Host: v2ray.com
-      # max-early-data: 2048
-      # early-data-header-name: Sec-WebSocket-Protocol
-      # v2ray-http-upgrade: false
-      # v2ray-http-upgrade-fast-open: false
+    # path: /path
+    # headers:
+    #   Host: v2ray.com
+    # max-early-data: 2048
+    # early-data-header-name: Sec-WebSocket-Protocol
+    # v2ray-http-upgrade: false
+    # v2ray-http-upgrade-fast-open: false
 
   - name: "vmess-mkcp"
     type: vmess
@@ -989,7 +1017,7 @@ proxies: # socks5
       # max-connections: 1 # Maximum connections. Conflict with max-streams.
       # min-streams: 0 # Minimum multiplexed streams in a connection before opening a new connection. Conflict with max-streams.
       # max-streams: 0 # Maximum multiplexed streams in a connection before opening a new connection. Conflict with max-connections and min-streams.
-      
+
     reality-opts:
       public-key: CrrQSjAG_YkHLwvM2M-7XkKJilgL5upBKCp0od0tLhE
       short-id: 10f897e26c4b9478
@@ -1097,7 +1125,6 @@ proxies: # socks5
       #   private-key: ...
       #   servername: xxx.com
       #   client-fingerprint: chrome
-
 
   # Trojan
   - name: "trojan"
@@ -1626,12 +1653,12 @@ proxies: # socks5
   - name: sudoku
     type: sudoku
     server: server_ip/domain # 1.2.3.4 or domain
-    port: 443 
+    port: 443
     key: "<client_key>" # 如果你使用sudoku生成的ED25519密钥对，请填写密钥对中的私钥，否则填入和服务端相同的uuid
     aead-method: chacha20-poly1305 # 可选：chacha20-poly1305、aes-128-gcm、none（不建议；none 不提供 AEAD 保护）
     padding-min: 2 # 最小填充率（0-100）
     padding-max: 7 # 最大填充率（0-100，必须 >= padding-min）
-    table-type: prefer_ascii    # 可选值：prefer_ascii、prefer_entropy、up_ascii_down_entropy、up_entropy_down_ascii
+    table-type: prefer_ascii # 可选值：prefer_ascii、prefer_entropy、up_ascii_down_entropy、up_entropy_down_ascii
     # custom-table: xpxvvpvv    # 可选，自定义字节布局，必须包含2个x、2个p、4个v，可随意组合；只对 entropy 方向生效
     # custom-tables: ["xpxvvpvv", "vxpvxvvp"] # 可选，自定义字节布局列表（x/v/p），非空时覆盖 custom-table
     # multiplex: "off" # 可选：off（默认）、auto（仅复用 HTTPMask 底层连接）、on（在原始 TCP 或 HTTPMask 上启用 Sudoku 单会话多目标 mux）
@@ -1698,7 +1725,7 @@ proxies: # socks5
     # min-streams: 5 # Minimum multiplexed streams in a connection before opening a new connection. Conflict with max-streams.
     # max-streams: 0 # Maximum multiplexed streams in a connection before opening a new connection. Conflict with max-connections and min-streams.
 
-# dns 出站会将请求劫持到内部 dns 模块，所有请求均在内部处理
+  # dns 出站会将请求劫持到内部 dns 模块，所有请求均在内部处理
   - name: "dns-out"
     type: dns
 
@@ -1746,7 +1773,6 @@ proxy-groups:
     url: "https://cp.cloudflare.com/generate_204"
     interval: 300
   # strategy: consistent-hashing # 可选 round-robin 和 sticky-sessions
-
   # select 用户自行选择节点
   - name: Proxy
     type: select
@@ -1795,8 +1821,8 @@ proxy-providers:
     # age-secret-key: AGE-SECRET-KEY-1ZTQLLN0A4U3ZTT3DCZKYN0CGZEZQLWX2DFTXUWMT4ZHR0N2UG6LSW9NT0N
     header:
       User-Agent:
-      - "Clash/v1.18.0"
-      - "mihomo/1.18.3"
+        - "Clash/v1.18.0"
+        - "mihomo/1.18.3"
       # Accept:
       # - 'application/vnd.github.v3.raw'
       # Authorization:
@@ -1931,9 +1957,9 @@ rule-providers:
     type: inline
     behavior: domain # classical / ipcidr
     payload:
-      - '.blogger.com'
-      - '*.*.microsoft.com'
-      - 'books.itunes.apple.com'
+      - ".blogger.com"
+      - "*.*.microsoft.com"
+      - "books.itunes.apple.com"
 
 rules:
   - RULE-SET,rule1,REJECT
@@ -2544,7 +2570,7 @@ listeners:
     table-type: prefer_ascii # 可选值：prefer_ascii、prefer_entropy、up_ascii_down_entropy、up_entropy_down_ascii
     # custom-table: xpxvvpvv # 可选，自定义字节布局，必须包含2个x、2个p、4个v，可随意组合；只对 entropy 方向生效
     # custom-tables: ["xpxvvpvv", "vxpvxvvp"] # 可选，自定义字节布局列表（x/v/p），用于多表轮换；非空时覆盖 custom-table
-    handshake-timeout: 5   # 可选（秒）
+    handshake-timeout: 5 # 可选（秒）
     enable-pure-downlink: false # 可选：false=带宽优化下行；true=纯 Sudoku 下行
     # 推荐：使用 httpmask 对象统一管理 HTTPMask 相关字段：
     httpmask:
@@ -2553,8 +2579,6 @@ listeners:
       # path-root: "" # 可选：HTTP 隧道端点一级路径前缀（双方需一致），例如 "aabbcc" 或 "/aabbcc/" => /aabbcc/session、/aabbcc/stream、/aabbcc/api/v1/upload、/aabbcc/ws
     #
     # fallback: "127.0.0.1:80" # 可选：用于可连接请求的回落转发，可与其他服务共端口
-
-
 
   - name: trojan-in-1
     type: trojan
@@ -2746,14 +2770,14 @@ listeners:
     # proxy: proxy # 如果不为空则直接将该入站流量交由指定 proxy 处理 (当 proxy 不为空时，这里的 proxy 名称必须合法，否则会出错)
     stack: system # gvisor / mixed
     dns-hijack:
-    - 0.0.0.0:53 # 需要劫持的 DNS
+      - 0.0.0.0:53 # 需要劫持的 DNS
     # auto-detect-interface: false # 自动识别出口网卡
     # auto-route: false # 配置路由表
     # mtu: 9000 # 最大传输单元
     inet4-address: # 必须手动设置 ipv4 地址段
-    - 198.19.0.1/30
+      - 198.19.0.1/30
     inet6-address: # 必须手动设置 ipv6 地址段
-    - "fdfe:dcba:9877::1/126"
+      - "fdfe:dcba:9877::1/126"
     # strict-route: true # 将所有连接路由到 tun 来防止泄漏，但你的设备将无法其他设备被访问
     # inet4-route-address: # 启用 auto-route 时使用自定义路由而不是默认路由
     # - 0.0.0.0/1
