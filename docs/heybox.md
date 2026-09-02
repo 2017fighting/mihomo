@@ -37,16 +37,13 @@ proxy-providers:
     games: [356]                 # acc_id 列表，必填（356 = Switch）
     # isp: liantong              # 可选：all(默认)/dianxin/liantong/yidong/bgp
     # api: https://accapi.xiaoheihe.cn   # 可选：API 地址覆盖
-    # interval: 0                # 默认不自动刷新（刷新 = 重新枚举）
-    health-check:
-      enable: true
-      url: http://www.baidu.com/   # 普通 HTTP 端点；勿用 conntest（经节点返回非标准应答）
-      interval: 600
+    # interval: 600              # 默认 600s：枚举刷新 = 更新节点列表与延迟数据（无会话副作用）
+    # 探活/测速 = 节点入口 UDP echo（零会话零 TCP），无需配置 health-check
 
 proxy-groups:
   - name: Switch加速
     type: url-test
-    url: http://www.baidu.com/
+    url: http://www.baidu.com/   # 占位（heybox 测速经 UDP echo，不实际请求）
     interval: 600
     use:
       - heybox
@@ -63,6 +60,15 @@ rules:
 
 生成的 proxy 名为 `{游戏名}-{节点名}`（如 `Switch-通用-日本3`、`Switch-通用-香港130`），
 可用 provider 的 `filter`/`exclude-filter` 与分组正则自由组合。
+
+## 探活与测速模型（与标准 provider 不同）
+
+- **健康检查/组测速/面板测速 = 节点入口 UDP echo 实测 RTT**（枚举响应自带回声地址；
+  原版客户端同款机制），零会话、零 TCP，不会再触发服务端风控
+- 枚举响应的 `rtt_avg`（<999 有效）作首轮初始值与 echo 失败时兜底
+- heybox provider **不配置 health-check**（写了也会被忽略）；`interval` 默认 600s，
+  含义为枚举刷新（节点列表 + 延迟数据），刷新动作无会话副作用
+- 会话仅在真实流量选中节点时按 `node_name` 分配（选中 ≠ 分配）
 
 ## 手动刷新
 
@@ -91,9 +97,8 @@ python3 test-heybox-acc/udp_test.py [mihomo地址:端口] [DNS服务器] [查询
 2. **账号互踢**：同一账号在官方客户端上开启加速会触发控制面互踢
    （`acc_status.is_acc_in_other_client`），路由器侧会话失效——自愈逻辑会在下次
    连接时自动重拉恢复；避免双端同时加速。
-3. **会话风控**：短时间内大量分配会话（频繁重启 + 每代理健康检查都会拉会话）
-   可能触发节点侧临时拉黑（表现为拨号超时，静置几分钟后恢复）。避免频繁重启；
-   健康检查间隔建议 ≥ 600s。
+3. **会话风控**：探活已改为 UDP echo（零会话），剩余风险仅来自频繁重启后首个
+   真实流量触发的分配。若仍遇拨号超时（节点侧临时拉黑），静置几分钟即恢复。
 4. **节点只接受 IP 目标且 TCP 端口受限**：出站已内置域名预解析（与原版行为一致）；
    TCP CONNECT 仅 80/443 等端口放行（其余 REP=0x0a）。
 5. **磁盘缓存脱敏**：provider 枚举结果落盘缓存不含 pkey（凭证仅在内存注入），

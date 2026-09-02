@@ -73,6 +73,13 @@ func TestHeyboxVehicleRenderAndParse(t *testing.T) {
 			t.Fatalf("rendered yaml missing %q:\n%s", want, buf)
 		}
 	}
+	// 回声探测地址与枚举延迟必须渲染（DelayHint 数据源）
+	if !containsString(string(buf), "echo-addr: 113.31.110.157:205") {
+		t.Fatalf("rendered yaml missing echo-addr:\n%s", buf)
+	}
+	if !containsString(string(buf), "rtt-avg: 45") {
+		t.Fatalf("rendered yaml missing rtt-avg:\n%s", buf)
+	}
 
 	parser, err := NewProxiesParser("hb-test", testTunnel(), "", "", "", "", overrideSchema{}, "")
 	if err != nil {

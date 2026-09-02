@@ -302,3 +302,73 @@ func readFull(c net.Conn, buf []byte) (int, error) {
 	}
 	return total, nil
 }
+
+// TestHeyboxDelayHint 验证零拨号探活：UDP echo 实测优先、枚举延迟兜底。
+func TestHeyboxDelayHint(t *testing.T) {
+	// mock echo 服务器：回显收到的 8 字节
+	uc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uc.Close()
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			n, from, err := uc.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_, _ = uc.WriteToUDP(buf[:n], from)
+		}
+	}()
+	echoAddr := uc.LocalAddr().String()
+
+	hb, err := NewHeybox(HeyboxOption{
+		Name:     "hb-hint",
+		HeyboxID: 1, Pkey: "x", AccID: 356,
+		EchoAddr: echoAddr,
+		RTTAvg:   45,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delay, err := hb.DelayHint(context.Background())
+	if err != nil {
+		t.Fatalf("DelayHint(echo): %v", err)
+	}
+	if delay == 0 || delay == 65535 {
+		t.Fatalf("DelayHint(echo) = %d, want positive finite", delay)
+	}
+
+	// echo 不可达时回退 rtt_avg
+	hb2, err := NewHeybox(HeyboxOption{
+		Name:     "hb-hint2",
+		HeyboxID: 1, Pkey: "x", AccID: 356,
+		EchoAddr: "127.0.0.1:1", // 无人监听
+		RTTAvg:   45,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	delay2, err := hb2.DelayHint(context.Background())
+	if err != nil {
+		t.Fatalf("DelayHint(fallback): %v", err)
+	}
+	if delay2 != 45 {
+		t.Fatalf("DelayHint(fallback) = %d, want 45", delay2)
+	}
+
+	// 两者皆不可用（rtt_avg=999 哨兵）→ 报不可达
+	hb3, err := NewHeybox(HeyboxOption{
+		Name:     "hb-hint3",
+		HeyboxID: 1, Pkey: "x", AccID: 356,
+		EchoAddr: "127.0.0.1:1",
+		RTTAvg:   999,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hb3.DelayHint(context.Background()); err == nil {
+		t.Fatal("DelayHint(rtt=999) should fail")
+	}
+}

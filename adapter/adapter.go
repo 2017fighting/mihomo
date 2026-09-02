@@ -199,6 +199,22 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 
 	}()
 
+	// 支持出站自定义测速（DelayHinter，如 heybox 的 UDP echo 探测）：
+	// 零拨号，结果同样记入延迟历史。沿包装链（AutoClose/singmux 等）下钻断言。
+	adapter := p.ProxyAdapter
+	for adapter != nil {
+		if hinter, ok := adapter.(C.DelayHinter); ok {
+			t, err = hinter.DelayHint(ctx)
+			satisfied = err == nil
+			return
+		}
+		if u, ok := adapter.(interface{ UnwrapAdapter() C.ProxyAdapter }); ok {
+			adapter = u.UnwrapAdapter()
+			continue
+		}
+		break
+	}
+
 	unifiedDelay := UnifiedDelay.Load()
 
 	addr, err := urlToMetadata(url)

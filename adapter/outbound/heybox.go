@@ -30,8 +30,10 @@ type HeyboxOption struct {
 	AccMode        int    `proxy:"acc-mode"`        // 默认 1
 	TransportProto string `proxy:"transport-proto"` // 默认 udp
 	ISP            string `proxy:"isp,omitempty"`
-	APIBase        string `proxy:"api,omitempty"`     // accapi 地址覆盖
-	NodeIP         string `proxy:"node-ip,omitempty"` // 枚举阶段的入口 IP（仅展示/参考）
+	APIBase        string `proxy:"api,omitempty"`       // accapi 地址覆盖
+	NodeIP         string `proxy:"node-ip,omitempty"`   // 枚举阶段的入口 IP（仅展示/参考）
+	EchoAddr       string `proxy:"echo-addr,omitempty"` // 入口 UDP 回声探测地址（ip:port，枚举下发）
+	RTTAvg         int    `proxy:"rtt-avg,omitempty"`   // 枚举延迟参考值，<999 有效；DelayHint 兜底
 }
 
 // heyboxAPIRequestTimeout 是控制面会话拉取的独立超时。
@@ -295,6 +297,26 @@ func (c *heyboxPacketConn) SetReadDeadline(t time.Time) error  { return errNoDea
 func (c *heyboxPacketConn) SetWriteDeadline(t time.Time) error { return errNoDeadline }
 
 var errNoDeadline = fmt.Errorf("heybox: deadline not supported")
+
+// DelayHint implements C.DelayHinter — 零拨号探活：优先对节点入口 UDP 回声
+// 端口实测 RTT（原版同款机制，无会话副作用）；失败时以枚举延迟 rtt_avg
+// （<999 有效）兜底；两者皆不可用才报不可达。健康检查/url-test/面板测速均复用此路径。
+func (h *Heybox) DelayHint(ctx context.Context) (uint16, error) {
+	if h.option.EchoAddr != "" {
+		hintCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		if rtt, err := heybox.UDPEchoPing(hintCtx, h.option.EchoAddr, 1500*time.Millisecond); err == nil {
+			cancel()
+			return rtt, nil
+		} else {
+			log.Debugln("[Heybox] %s echo ping %s: %v", h.name, h.option.EchoAddr, err)
+		}
+		cancel()
+	}
+	if h.option.RTTAvg > 0 && h.option.RTTAvg < 999 {
+		return uint16(h.option.RTTAvg), nil
+	}
+	return 0, fmt.Errorf("heybox %s: node unreachable (echo failed, rtt_avg=%d)", h.name, h.option.RTTAvg)
+}
 
 // ProxyInfo implements C.ProxyAdapter
 func (h *Heybox) ProxyInfo() C.ProxyInfo {

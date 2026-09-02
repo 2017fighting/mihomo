@@ -111,6 +111,8 @@ func (v *HeyboxVehicle) render(ctx context.Context) ([]byte, error) {
 					"acc-mode":        accMode,
 					"transport-proto": "udp",
 					"node-ip":         hostOnly(node.Src),
+					"echo-addr":       node.Src, // 入口 UDP 回声探测地址（DelayHint 用）
+					"rtt-avg":         node.RTTAvg,
 					"udp":             true,
 				})
 			}

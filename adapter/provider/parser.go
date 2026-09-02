@@ -105,15 +105,21 @@ func ParseProxyProvider(name string, mapping map[string]any, tunnel C.Tunnel) (P
 		if len(heyboxSchema.Games) == 0 {
 			return nil, errors.New("heybox provider requires games (acc_id list)")
 		}
-		// 默认不自动定时刷新：刷新（手动/RESTful API）语义 = 重新枚举节点。
-		// interval 仅在用户显式配置时生效。
+		// 探活/测速由出站的 DelayHint（UDP echo）承担，不使用 TCP 健康检查；
+		// 用户配置的 health-check 被忽略（中性化：无 url、不自动跑）。
+		hcNeutral := NewHealthCheck([]C.Proxy{}, "", 0, 0, true, nil)
+		// 枚举无会话副作用，默认 600s 自动刷新 = 节点列表与延迟数据刷新
+		interval := time.Duration(uint(schema.Interval)) * time.Second
+		if schema.Interval == 0 {
+			interval = 600 * time.Second
+		}
 		return NewProxySetProvider(
 			name,
-			time.Duration(uint(schema.Interval))*time.Second,
+			interval,
 			schema.Payload,
 			wrapHeyboxCredParser(parser, heyboxSchema),
 			NewHeyboxVehicle(name, heyboxSchema),
-			hc,
+			hcNeutral,
 		)
 	default:
 		return nil, fmt.Errorf("%w: %s", errVehicleType, schema.Type)
