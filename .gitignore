@@ -26,3 +26,6 @@ test/config/cache*
 /output
 .vscode/
 .fleet/
+# local build & heybox test workspace (contains real credentials)
+/mihomo
+test-heybox-acc/
