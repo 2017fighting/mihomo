@@ -60,3 +60,46 @@ func (m *Manager) RewriteLookup(ips []netip.Addr, isV6 bool) []netip.Addr {
 	copy(out, pool)
 	return out
 }
+
+// Verify verdicts (docs/adr/0004). Pure enum, part of the REST contract:
+// appending new values is allowed, renumbering/removal is not.
+const (
+	VerdictRewritten            = "rewritten"              // answers replaced from the pool
+	VerdictBlocked              = "blocked"                // ipv6:block matched; empty AAAA answer
+	VerdictPassthroughNoMatch   = "passthrough-no-match"   // upstream IPs outside every range set
+	VerdictPassthroughPoolEmpty = "passthrough-pool-empty" // matched but that family's pool is empty
+	VerdictResolveError         = "resolve-error"          // upstream resolution itself failed
+)
+
+// FamilyVerdict is one address family's verify result: the production
+// decision applied to a live upstream answer.
+type FamilyVerdict struct {
+	Verdict   string   `json:"verdict"`
+	Entry     string   `json:"entry,omitempty"`     // matched entry name, if any
+	Upstream  []string `json:"upstream,omitempty"`  // resolved upstream IPs
+	Rewritten []string `json:"rewritten,omitempty"` // what a client would receive instead
+}
+
+// VerifyFamily applies the same decision logic both rewrite hooks share
+// (Match + BlockIPv6 + AnswerPool) to an already-resolved upstream answer
+// for one family. Pure: no resolution happens here; the REST layer resolves
+// and maps transport failures to VerdictResolveError.
+func (m *Manager) VerifyFamily(ips []netip.Addr, isV6 bool) FamilyVerdict {
+	fv := FamilyVerdict{Verdict: VerdictPassthroughNoMatch, Upstream: addrStrings(ips)}
+	entry := m.Match(ips, isV6)
+	if entry == nil {
+		return fv
+	}
+	fv.Entry = entry.Name()
+	if isV6 && entry.BlockIPv6() {
+		fv.Verdict = VerdictBlocked
+		return fv
+	}
+	if pool := entry.AnswerPool(isV6); len(pool) > 0 {
+		fv.Verdict = VerdictRewritten
+		fv.Rewritten = addrStrings(pool)
+		return fv
+	}
+	fv.Verdict = VerdictPassthroughPoolEmpty
+	return fv
+}

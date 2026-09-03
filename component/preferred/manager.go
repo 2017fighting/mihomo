@@ -89,25 +89,26 @@ func (m *Manager) Match(ips []netip.Addr, isV6 bool) *entry {
 	return nil
 }
 
-// TriggerSpeedTest nudges one entry (by name, or all when name == "") into an
-// immediate retest round. Returns false when the name is unknown or a round is
-// already running for every targeted entry.
-func (m *Manager) TriggerSpeedTest(name string) bool {
+// TriggerSpeedTest nudges one entry (by name, or all when name == "") into
+// an immediate retest round. found reports whether any entry matched the
+// name; triggered whether at least one round was actually queued. triggered
+// == false with found == true means every targeted entry already has a
+// round queued or running.
+func (m *Manager) TriggerSpeedTest(name string) (found, triggered bool) {
 	entries := *m.entries.Load()
-	triggered := false
 	for _, e := range entries {
 		if name != "" && e.cfg.Name != name {
 			continue
 		}
+		found = true
 		select {
 		case e.testing <- struct{}{}:
 			triggered = true
 		default:
 			// a round is already queued/running for this entry; keep it.
-			triggered = triggered || name == ""
 		}
 	}
-	return triggered
+	return found, triggered
 }
 
 // Status renders every entry for the REST API.
@@ -121,6 +122,8 @@ func (m *Manager) Status() []EntryStatus {
 			AnswerCount: e.answerCount(),
 			TTLCap:      int(e.ttlCap()),
 			Persist:     e.cfg.Persist,
+			Ranges:      e.cfg.CIDR,
+			Testing:     e.testingActive.Load(),
 		}
 		if p := e.v4Pool.Load(); p != nil {
 			es.V4 = addrStrings(p.IPs)
@@ -141,6 +144,8 @@ type EntryStatus struct {
 	AnswerCount int       `json:"answer-count"`
 	TTLCap      int       `json:"ttl-cap"`
 	Persist     bool      `json:"persist"`
+	Ranges      []string  `json:"ranges"`
+	Testing     bool      `json:"testing"`
 	V4          []string  `json:"v4-pool,omitempty"`
 	V4TestedAt  time.Time `json:"v4-tested-at,omitzero"`
 	V6          []string  `json:"v6-pool,omitempty"`
@@ -179,7 +184,10 @@ func (e *entry) schedule(ctx context.Context) {
 		}
 
 		var next time.Duration
-		if err := e.testRound(ctx); err != nil {
+		e.testingActive.Store(true)
+		err := e.testRound(ctx)
+		e.testingActive.Store(false)
+		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}

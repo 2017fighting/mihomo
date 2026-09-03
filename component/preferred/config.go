@@ -14,6 +14,7 @@ package preferred
 import (
 	"fmt"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/component/cidr"
@@ -76,6 +77,10 @@ type entry struct {
 	v6Pool atomicPool
 
 	testing chan struct{} // buffered(1) nudge channel for manual triggers
+
+	// testingActive mirrors "a round is currently running" for the REST
+	// status surface; the channel above cannot be inspected.
+	testingActive atomic.Bool
 }
 
 func (e *entry) answerCount() int {

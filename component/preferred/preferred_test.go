@@ -204,3 +204,116 @@ func TestScheduleCancelSafe(t *testing.T) {
 	cancel() // must not leak/panic; goroutine exits on next select
 	time.Sleep(50 * time.Millisecond)
 }
+
+func TestVerifyFamilyVerdicts(t *testing.T) {
+	inCF := netip.MustParseAddr("103.21.244.10")
+	outCF := netip.MustParseAddr("1.2.3.4")
+	cf6 := netip.MustParseAddr("2606:4700::1")
+
+	// replace mode, both pools ready
+	e := testEntry(t, ModeReplace)
+	e.v4Pool.Store(poolV4, time.Now())
+	e.v6Pool.Store(poolV6, time.Now())
+	m := testManager(t, e)
+
+	// rewritten (v4): verdict + entry + trimmed pool as rewritten answers
+	fv := m.VerifyFamily([]netip.Addr{inCF, outCF}, false)
+	if fv.Verdict != VerdictRewritten || fv.Entry != "cf" {
+		t.Fatalf("v4: got %+v", fv)
+	}
+	if len(fv.Rewritten) != 2 { // answer-count trims pool to 2
+		t.Fatalf("v4 rewritten not trimmed: %+v", fv.Rewritten)
+	}
+	if len(fv.Upstream) != 2 {
+		t.Fatalf("v4 upstream should echo resolved ips: %+v", fv.Upstream)
+	}
+
+	// rewritten (v6, replace mode)
+	fv = m.VerifyFamily([]netip.Addr{cf6}, true)
+	if fv.Verdict != VerdictRewritten || len(fv.Rewritten) != 2 {
+		t.Fatalf("v6: got %+v", fv)
+	}
+
+	// blocked (v6, block mode) even with a pool present
+	eb := testEntry(t, ModeBlock)
+	eb.v6Pool.Store(poolV6, time.Now())
+	mb := testManager(t, eb)
+	fv = mb.VerifyFamily([]netip.Addr{cf6}, true)
+	if fv.Verdict != VerdictBlocked || len(fv.Rewritten) != 0 {
+		t.Fatalf("blocked: got %+v", fv)
+	}
+
+	// passthrough-no-match
+	fv = m.VerifyFamily([]netip.Addr{outCF}, false)
+	if fv.Verdict != VerdictPassthroughNoMatch || fv.Entry != "" {
+		t.Fatalf("no-match: got %+v", fv)
+	}
+
+	// passthrough-pool-empty: matched but that family's pool is absent
+	fv = m.VerifyFamily([]netip.Addr{inCF}, false)
+	e2 := testEntry(t, ModeReplace)
+	m2 := testManager(t, e2)
+	fv = m2.VerifyFamily([]netip.Addr{inCF}, false)
+	if fv.Verdict != VerdictPassthroughPoolEmpty || fv.Entry != "cf" {
+		t.Fatalf("pool-empty: got %+v", fv)
+	}
+	// v4 ready but v6 empty is a per-family signal
+	e2.v4Pool.Store(poolV4, time.Now())
+	if fv := m2.VerifyFamily([]netip.Addr{inCF}, false); fv.Verdict != VerdictRewritten {
+		t.Fatalf("v4 after store: got %+v", fv)
+	}
+	if fv := m2.VerifyFamily([]netip.Addr{cf6}, true); fv.Verdict != VerdictPassthroughPoolEmpty {
+		t.Fatalf("v6 after v4 store: got %+v", fv)
+	}
+}
+
+func TestTriggerSpeedTestFoundVsTriggered(t *testing.T) {
+	e := testEntry(t, ModeReplace)
+	m := testManager(t, e)
+
+	if found, triggered := m.TriggerSpeedTest("nope"); found || triggered {
+		t.Fatalf("unknown name must be found=false: %v %v", found, triggered)
+	}
+
+	found, triggered := m.TriggerSpeedTest("cf")
+	if !found || !triggered {
+		t.Fatalf("idle entry must queue: %v %v", found, triggered)
+	}
+	// channel buffer is 1: second nudge must report already-queued
+	found, triggered = m.TriggerSpeedTest("cf")
+	if !found || triggered {
+		t.Fatalf("queued entry must be found=true triggered=false: %v %v", found, triggered)
+	}
+
+	// trigger-all when every entry is busy: honest 409, not a fake success
+	found, triggered = m.TriggerSpeedTest("")
+	if !found || triggered {
+		t.Fatalf("all-busy trigger-all must be found=true triggered=false: %v %v", found, triggered)
+	}
+
+	// empty manager: nothing found
+	empty := NewManager()
+	if found, _ := empty.TriggerSpeedTest(""); found {
+		t.Fatal("empty manager must report found=false")
+	}
+}
+
+func TestStatusExposesTestingFlagAndRanges(t *testing.T) {
+	e := testEntry(t, ModeReplace)
+	e.v4Pool.Store(poolV4, time.Now())
+	m := testManager(t, e)
+
+	st := m.Status()[0]
+	if st.Testing {
+		t.Fatal("fresh entry must not report testing")
+	}
+	if len(st.Ranges) != 2 {
+		t.Fatalf("ranges should echo configured CIDR: %+v", st.Ranges)
+	}
+
+	e.testingActive.Store(true)
+	if st := m.Status()[0]; !st.Testing {
+		t.Fatal("active round must be visible in status")
+	}
+	e.testingActive.Store(false)
+}
