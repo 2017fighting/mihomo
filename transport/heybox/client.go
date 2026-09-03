@@ -266,15 +266,33 @@ func (c *Client) handshake(ctx context.Context, conn net.Conn, br *bufio.Reader,
 
 // resolveToIP 尽力把 host:port 解析为 IP:port（原版行为）；失败时原样返回。
 // 真实节点只接受 IP 目标（ATYP=3 域名会被拒绝，实测 REP=0x0a）。
-// 必须走 mihomo 解析链（DefaultResolver→SystemResolver）——
-// 禁用裸 net 解析器（main.go 挂了 net.DefaultResolver 防护钩，命中即 panic）。
-func resolveToIP(address string) string {
+// 有 mihomo DNS 环境（主程序，dns 包 init 已就绪）时走解析链
+// （DefaultResolver→SystemResolver）；独立进程/单测里两者均为 nil，
+// 回退独立实例的 net.Resolver 系统解析（与 api.go 同款防护；不可用
+// net.DefaultResolver——main.go 挂了防护钩，命中即 panic）。
+func resolveToIP(ctx context.Context, address string) string {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil || net.ParseIP(host) != nil {
 		return address
 	}
-	if ip, err := resolver.ResolveIP(context.Background(), host); err == nil {
-		return net.JoinHostPort(ip.String(), port)
+	if resolver.DefaultResolver != nil || resolver.SystemResolver != nil {
+		if ip, err := resolver.ResolveIP(ctx, host); err == nil {
+			return net.JoinHostPort(ip.String(), port)
+		}
+		return address
+	}
+	// 无 mihomo DNS 环境：系统解析尽力而为
+	addrs, err := (&net.Resolver{}).LookupIPAddr(ctx, host)
+	if err != nil {
+		return address
+	}
+	for _, a := range addrs {
+		if a.IP.To4() != nil {
+			return net.JoinHostPort(a.IP.String(), port)
+		}
+	}
+	if len(addrs) > 0 {
+		return net.JoinHostPort(addrs[0].IP.String(), port)
 	}
 	return address
 }
@@ -293,7 +311,7 @@ func (c *Client) DialTCP(ctx context.Context, address string) (net.Conn, *SocksR
 		Flags: c.flags(),
 		Pwd:   PwdBase(c.Sess),
 		User:  c.Sess.Username,
-		Addr:  resolveToIP(address),
+		Addr:  resolveToIP(ctx, address),
 	}
 	br := bufio.NewReader(conn)
 	resp, err := c.handshake(ctx, conn, br, req)
