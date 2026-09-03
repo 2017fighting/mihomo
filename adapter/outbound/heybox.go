@@ -204,12 +204,12 @@ func (h *Heybox) newClient(node string, cfg *heybox.NodeConfig) *heybox.Client {
 			}
 			pc, err := h.dialer.ListenPacket(ctx, "udp", "", addrPort)
 			if err != nil {
-			return nil, err
+				return nil, err
 			}
 			uc, ok := pc.(*net.UDPConn)
 			if !ok {
-			pc.Close()
-			return nil, fmt.Errorf("heybox %s: dialer returned %T, want *net.UDPConn", h.name, pc)
+				pc.Close()
+				return nil, fmt.Errorf("heybox %s: dialer returned %T, want *net.UDPConn", h.name, pc)
 			}
 			return uc, nil
 		},
