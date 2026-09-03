@@ -157,7 +157,9 @@ func (h *Heybox) withSession(ctx context.Context, fn func(cfg *heybox.NodeConfig
 	return nil
 }
 
-// resolveAddress 把 host:port 中的域名解析为 IP（节点拒收域名目标，REP=0x0a）。
+// resolveAddress 把 host:port 中的域名解析为 IP（节点只接受 IP 目标：TCP CONNECT
+// 域名实测 REP=0x0a 拒绝；UDP 数据报携带 ATYP=3 域名同样会被丢弃，原版从不发送域名）。
+// 解析失败时记日志并原样返回（与原版"原样发送"行为一致）。
 func (h *Heybox) resolveAddress(ctx context.Context, address string) string {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
@@ -168,7 +170,8 @@ func (h *Heybox) resolveAddress(ctx context.Context, address string) string {
 	}
 	ip, err := resolveIPWithResolver(ctx, host, h.prefer, resolver.DefaultResolver)
 	if err != nil {
-		return address // 解析失败原样发送（与原版行为一致）
+		log.Debugln("[Heybox] %s resolve %s failed: %v, send as-is (node may drop)", h.name, host, err)
+		return address
 	}
 	return net.JoinHostPort(ip.String(), port)
 }
@@ -247,23 +250,19 @@ func (h *Heybox) ListenPacketContext(ctx context.Context, metadata *C.Metadata) 
 	if err != nil {
 		return nil, fmt.Errorf("heybox %s: udp associate: %w", h.name, err)
 	}
-	return NewPacketConn(&heyboxPacketConn{assoc: assoc}, h), nil
+	return NewPacketConn(&heyboxPacketConn{assoc: assoc, hb: h}, h), nil
 }
 
 // heyboxPacketConn 把 UDP 关联适配为 mihomo 的 PacketConn：
 // 每个出站包加 gost 风格头（marker/flags/session_id/AddrN），入站包反向解析。
 type heyboxPacketConn struct {
 	assoc *heybox.UDPAssociation
+	hb    *Heybox // 用于域名目标解析（遵守 ip-version prefer）与日志
 }
 
 func (c *heyboxPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	dst := addr.String()
-	if host, port, err := net.SplitHostPort(dst); err == nil && net.ParseIP(host) == nil {
-		// 节点拒收域名：尽力解析为 IP
-		if ip, err := resolver.ResolveIP(context.Background(), host); err == nil {
-			dst = net.JoinHostPort(ip.String(), port)
-		}
-	}
+	// 节点只接受 IP 目标：域名先解析为 IP（与 TCP 路径共用 resolveAddress）。
+	dst := c.hb.resolveAddress(context.Background(), addr.String())
 	if err := c.assoc.SendTo(b, dst); err != nil {
 		return 0, err
 	}
@@ -271,11 +270,10 @@ func (c *heyboxPacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 }
 
 func (c *heyboxPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	data, from, err := c.assoc.ReadFrom()
+	n, from, err := c.assoc.ReadFrom(b)
 	if err != nil {
 		return 0, nil, err
 	}
-	n := copy(b, data)
 	udpAddr := &net.UDPAddr{IP: net.ParseIP(from.Host), Port: int(from.Port)}
 	return n, udpAddr, nil
 }
@@ -292,11 +290,11 @@ func (c *heyboxPacketConn) LocalAddr() net.Addr {
 	return &net.UDPAddr{}
 }
 
-func (c *heyboxPacketConn) SetDeadline(t time.Time) error      { return errNoDeadline }
-func (c *heyboxPacketConn) SetReadDeadline(t time.Time) error  { return errNoDeadline }
-func (c *heyboxPacketConn) SetWriteDeadline(t time.Time) error { return errNoDeadline }
-
-var errNoDeadline = fmt.Errorf("heybox: deadline not supported")
+// deadline 为 no-op：NewPacketConn 对非 syscall.Conn 的包连接自动套
+// NewDeadlineEnhancePacketConn 截止时间模拟层，此处返回 nil 即可（仓库惯例）。
+func (c *heyboxPacketConn) SetDeadline(t time.Time) error      { return nil }
+func (c *heyboxPacketConn) SetReadDeadline(t time.Time) error  { return nil }
+func (c *heyboxPacketConn) SetWriteDeadline(t time.Time) error { return nil }
 
 // DelayHint implements C.DelayHinter — 零拨号探活：优先对节点入口 UDP 回声
 // 端口实测 RTT（原版同款机制，无会话副作用）；失败时以枚举延迟 rtt_avg

@@ -228,10 +228,12 @@ func TestLiveProbe(t *testing.T) {
 			t.Fatalf("step5b SendTo: %v", err)
 		}
 		_ = assoc.SetReadDeadline(time.Now().Add(10 * time.Second))
-		data, from, err := assoc.ReadFrom()
+		buf := make([]byte, 65535)
+		n, from, err := assoc.ReadFrom(buf)
 		if err != nil {
 			t.Fatalf("step5b ReadFrom: %v", err)
 		}
+		data := buf[:n]
 		t.Logf("step5b OK: UDP DNS 经中继往返, from=%s len=%d resp[2:4]=%02x%02x (DNS flags)", from, len(data), data[2], data[3])
 	}
 

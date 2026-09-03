@@ -6,15 +6,19 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/component/resolver"
+	"github.com/metacubex/mihomo/component/trie"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/transport/heybox"
 )
@@ -26,6 +30,16 @@ type mockNode struct {
 	udpRelay  *net.UDPConn // UDP 中继（BND.PORT 指向这里）
 	relayPort int
 	xorKey    []byte // TCP 数据通道 XOR 密钥（由 mock accapi 下发同一密钥）
+
+	mu       sync.Mutex
+	lastAddr *heybox.AddrN // 最近一次中继解析出的出站目标地址
+}
+
+// lastRelayAddr 返回最近一次中继收到的目标地址（用于断言域名→IP 改写）。
+func (m *mockNode) lastRelayAddr() *heybox.AddrN {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastAddr
 }
 
 func startMockNode(t *testing.T) *mockNode {
@@ -159,6 +173,9 @@ func (m *mockNode) relayUDP(t *testing.T) {
 			t.Logf("mock relay: parse addr: %v", err)
 			continue
 		}
+		m.mu.Lock()
+		m.lastAddr = addr
+		m.mu.Unlock()
 		payload := buf[off+addrLen : n]
 		// 服务器→客户端方向: [RSV u16][flags u8][AddrN][payload]，源地址 = 目标地址
 		ab, err := addr.EncodeToBytes()
@@ -301,6 +318,112 @@ func readFull(c net.Conn, buf []byte) (int, error) {
 		total += n
 	}
 	return total, nil
+}
+
+// heyboxDomainAddr 模拟携带域名目标的 UDP 地址（如 SOCKS5 入站 ATYP=3）。
+type heyboxDomainAddr struct {
+	host string
+	port int
+}
+
+func (a heyboxDomainAddr) Network() string { return "udp" }
+func (a heyboxDomainAddr) String() string  { return net.JoinHostPort(a.host, strconv.Itoa(a.port)) }
+
+// failResolver 模拟无可用 DNS 的系统解析器（仅打桩 LookupIPv4，其余方法不可达）。
+type failResolver struct{ resolver.Resolver }
+
+func (failResolver) LookupIPv4(ctx context.Context, host string) ([]netip.Addr, error) {
+	return nil, errors.New("no dns in test")
+}
+
+// TestHeyboxUDPWriteDomainTarget 验证 UDP 域名目标的处理：
+// 节点只接受 IP 目标，域名必须先解析（遵守 hosts/Resolver 链）；
+// 解析失败时原样发送（ATYP=3，与原版"原样发送"行为一致）。
+func TestHeyboxUDPWriteDomainTarget(t *testing.T) {
+	node := startMockNode(t)
+	defer node.tcpLn.Close()
+	defer node.udpRelay.Close()
+	api := startMockAccapi(t, node)
+	defer api.Close()
+
+	hb, err := NewHeybox(HeyboxOption{
+		Name:         "hb-udp-domain",
+		HeyboxID:     88800123,
+		Pkey:         "pkeyABC",
+		AccID:        356,
+		GameID:       353,
+		ServerRegion: 1001,
+		NodeName:     "日本3",
+		APIBase:      api.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 注入 hosts：example.com → 8.8.8.8；SystemResolver 打桩为失败
+	tree := trie.New[resolver.HostValue]()
+	hv, err := resolver.NewHostValueByIPs([]netip.Addr{netip.MustParseAddr("8.8.8.8")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tree.Insert("example.com", hv); err != nil {
+		t.Fatal(err)
+	}
+	oldHosts := resolver.DefaultHosts
+	oldSR := resolver.SystemResolver
+	resolver.DefaultHosts = resolver.NewHosts(tree)
+	resolver.SystemResolver = failResolver{}
+	t.Cleanup(func() {
+		resolver.DefaultHosts = oldHosts
+		resolver.SystemResolver = oldSR
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	metaUDP := &C.Metadata{
+		NetWork: C.UDP,
+		DstIP:   netip.MustParseAddr("8.8.8.8"),
+		Host:    "8.8.8.8",
+		DstPort: 53,
+	}
+	pc, err := hb.ListenPacketContext(ctx, metaUDP)
+	if err != nil {
+		t.Fatalf("ListenPacketContext: %v", err)
+	}
+	defer pc.Close()
+
+	// 1. 域名命中 hosts → 应改写为 ATYP=1 IPv4 发给中继
+	if _, err := pc.WriteTo([]byte("q1"), heyboxDomainAddr{host: "example.com", port: 53}); err != nil {
+		t.Fatalf("udp write domain: %v", err)
+	}
+	buf := make([]byte, 1024)
+	_ = pc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := pc.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("udp read (domain): %v", err)
+	}
+	if got := string(buf[:n]); got != "ECHO:q1" {
+		t.Fatalf("udp echo (domain) = %q", got)
+	}
+	if la := node.lastRelayAddr(); la == nil || la.Type != heybox.AtypIPv4 || la.Host != "8.8.8.8" || la.Port != 53 {
+		t.Fatalf("relay addr = %+v, want ATYP=1 8.8.8.8:53", la)
+	}
+
+	// 2. 域名解析失败 → 原样发送（ATYP=3 域名，节点会丢弃；与原版一致）
+	if _, err := pc.WriteTo([]byte("q2"), heyboxDomainAddr{host: "no-dns.invalid", port: 53}); err != nil {
+		t.Fatalf("udp write unresolvable: %v", err)
+	}
+	_ = pc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err = pc.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("udp read (unresolvable): %v", err)
+	}
+	if got := string(buf[:n]); got != "ECHO:q2" {
+		t.Fatalf("udp echo (unresolvable) = %q", got)
+	}
+	if la := node.lastRelayAddr(); la == nil || la.Type != heybox.AtypDomain || la.Host != "no-dns.invalid" {
+		t.Fatalf("relay addr = %+v, want ATYP=3 no-dns.invalid:53", la)
+	}
 }
 
 // TestHeyboxDelayHint 验证零拨号探活：UDP echo 实测优先、枚举延迟兜底。

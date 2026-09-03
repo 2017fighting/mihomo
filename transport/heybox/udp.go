@@ -149,18 +149,21 @@ func (a *UDPAssociation) SendTo(payload []byte, dst string) error {
 	return err
 }
 
-// ReadFrom 从中继接收一个数据报，返回载荷与来源地址。
-func (a *UDPAssociation) ReadFrom() ([]byte, *AddrN, error) {
-	buf := make([]byte, 65535)
-	n, _, err := a.pc.ReadFromUDP(buf)
+// ReadFrom 从中继接收一个数据报：读入 b 并解析，载荷移动到 b 前部，
+// 返回载荷长度与来源地址。与 net.UDPConn.ReadFrom 同款缓冲复用语义
+// （避免每包分配 64KB），b 容量需 ≥ 最大数据报长度（如 65535）；
+// 返回的 Addr 字段不引用 b，可跨调用持有。
+func (a *UDPAssociation) ReadFrom(b []byte) (int, *AddrN, error) {
+	n, _, err := a.pc.ReadFromUDP(b)
 	if err != nil {
-		return nil, nil, err
+		return 0, nil, err
 	}
-	d, err := ParseGostUDPDatagram(buf[:n])
+	d, err := ParseGostUDPDatagram(b[:n])
 	if err != nil {
-		return nil, nil, fmt.Errorf("heybox: parse datagram: %w", err)
+		return 0, nil, fmt.Errorf("heybox: parse datagram: %w", err)
 	}
-	return d.Data, d.Addr, nil
+	copy(b, d.Data) // 载荷前移（d.Data 引用 b 内部偏移，copy 为重叠安全的 memmove）
+	return len(d.Data), d.Addr, nil
 }
 
 // SetReadDeadline 设置中继接收超时。
