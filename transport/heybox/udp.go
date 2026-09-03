@@ -223,7 +223,12 @@ func (c *Client) UDPAssociate(ctx context.Context) (*UDPAssociation, error) {
 			relay.IP = net.ParseIP(host)
 		}
 	}
-	pc, err := net.ListenUDP("udp", nil)
+	var pc *net.UDPConn
+	if c.ListenPacket != nil {
+		pc, err = c.ListenPacket(ctx, c.Node)
+	} else {
+		pc, err = net.ListenUDP("udp", nil)
+	}
 	if err != nil {
 		conn.Close()
 		return nil, err

@@ -199,6 +199,11 @@ type Client struct {
 	Flags byte
 	// DialNode 建立到节点的 TCP 连接；nil 时用 net.Dialer 直连。
 	DialNode func(ctx context.Context, node string) (net.Conn, error)
+	// ListenPacket 建立承载 UDP 数据报的本地 socket（发往中继）；nil 时用
+	// net.ListenUDP 直听。经 mihomo dialer 时携带 interface-name/routing-mark
+	// 绑定——tun 透明网关环境下避免中继流量被自家的 tun 二次捕获（环路），
+	// 与其他 UDP 出站（socks5/shadowsocks 等）的 socket 建立方式对齐。
+	ListenPacket func(ctx context.Context, node string) (*net.UDPConn, error)
 	// DialTimeout 为连节点超时，零值 2s（原版 2s）。
 	DialTimeout time.Duration
 	// HandshakeTimeout 为读应答超时，零值 10s（原版 10s）。

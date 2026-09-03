@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -189,6 +190,28 @@ func (h *Heybox) newClient(node string, cfg *heybox.NodeConfig) *heybox.Client {
 		XORKey: cfg.XORKey(), // TCP 数据通道循环 XOR（握手帧不参与）
 		DialNode: func(ctx context.Context, node string) (net.Conn, error) {
 			return h.dialer.DialContext(ctx, "tcp", node)
+		},
+		// 中继 UDP socket 也走 dialer（interface-name/routing-mark 绑定），
+		// tun 环境防自环；与其他 UDP 出站对齐（socks5/shadowsocks 同款）
+		ListenPacket: func(ctx context.Context, node string) (*net.UDPConn, error) {
+			host, portStr, err := net.SplitHostPort(node)
+			if err != nil {
+				return nil, fmt.Errorf("heybox %s: bad node %q: %w", h.name, node, err)
+			}
+			addrPort, err := netip.ParseAddrPort(net.JoinHostPort(host, portStr))
+			if err != nil {
+				return nil, fmt.Errorf("heybox %s: bad node %q: %w", h.name, node, err)
+			}
+			pc, err := h.dialer.ListenPacket(ctx, "udp", "", addrPort)
+			if err != nil {
+			return nil, err
+			}
+			uc, ok := pc.(*net.UDPConn)
+			if !ok {
+			pc.Close()
+			return nil, fmt.Errorf("heybox %s: dialer returned %T, want *net.UDPConn", h.name, pc)
+			}
+			return uc, nil
 		},
 	}
 }
